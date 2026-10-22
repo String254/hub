@@ -61,8 +61,7 @@ const uploadReceipt = '$baseUrl/upload-receipt';
 
 
 //Chatbot
-const chatbot = 'https://kejahub125.app.n8n.cloud/webhook/ai/property-manager';
-const sessionToken = '$baseUrl/ai/session';
+const aiSessionUrl = '$baseUrl/ai/session';
 
 
 //N8N Webhooks

@@ -2,12 +2,13 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show LogicalKeyboardKey, TextInputAction;
 import 'package:hub/services/services.dart';
 import 'package:hub/widgets/widgets.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 // ─────────────────────────────────────────────────────────────
-//  Design tokens
+// Design tokens
 // ─────────────────────────────────────────────────────────────
 const Color _kPrimary = Color(0xff2563EB);
 const Color _kSecondary = Color(0xff4F46E5);
@@ -16,6 +17,7 @@ const Color _kBg = Color(0xffF7F9FC);
 const Color _kBorder = Color(0xffE8ECF2);
 const Color _kInk = Color(0xff0F172A);
 const Color _kMuted = Color(0xff94A3B8);
+const Color _kTabTrack = Color(0xffF1F5F9);
 
 class ChatPage extends StatefulWidget {
   const ChatPage({super.key});
@@ -25,15 +27,40 @@ class ChatPage extends StatefulWidget {
 }
 
 class ChatPageState extends State<ChatPage> {
+  static const List<String> _kMonthNames = [
+    'January',
+    'February',
+    'March',
+    'April',
+    'May',
+    'June',
+    'July',
+    'August',
+    'September',
+    'October',
+    'November',
+    'December',
+  ];
+
   final List<ChatMessage> _messages = [];
 
   final TextEditingController _textController = TextEditingController();
+  final TextEditingController _faqSearchController = TextEditingController();
+
   final ScrollController _scrollController = ScrollController();
   final FocusNode _focusNode = FocusNode();
 
   bool _isTyping = false;
   bool _hasText = false;
   bool _showScrollButton = false;
+
+// FAQ state
+  List<AssistantFaq> _faqs = [];
+  bool _isLoadingFaqs = false;
+  bool _showFaqs = false;
+  String? _faqError;
+  String _faqSearchQuery = '';
+  int? _expandedFaqId;
 
   String? userFirstName;
   String? userID;
@@ -85,14 +112,20 @@ class ChatPageState extends State<ChatPage> {
     ),
   ];
 
-  // ── Lifecycle ──────────────────────────────────────────────
+  // ───────────────────────────────────────────────────────────
+  // Lifecycle
+  // ───────────────────────────────────────────────────────────
   @override
   void initState() {
     super.initState();
+
     _textController.addListener(_onTextChanged);
     _focusNode.addListener(_onFocusChanged);
     _scrollController.addListener(_onScroll);
+    _faqSearchController.addListener(_onFaqSearchChanged);
+
     _init();
+    _loadFaqs();
   }
 
   @override
@@ -100,14 +133,19 @@ class ChatPageState extends State<ChatPage> {
     _textController.removeListener(_onTextChanged);
     _focusNode.removeListener(_onFocusChanged);
     _scrollController.removeListener(_onScroll);
+    _faqSearchController.removeListener(_onFaqSearchChanged);
+
     _textController.dispose();
+    _faqSearchController.dispose();
     _scrollController.dispose();
     _focusNode.dispose();
+
     super.dispose();
   }
 
   void _onTextChanged() {
     final has = _textController.text.trim().isNotEmpty;
+
     if (has != _hasText) {
       setState(() => _hasText = has);
     }
@@ -119,11 +157,22 @@ class ChatPageState extends State<ChatPage> {
 
   void _onScroll() {
     if (!_scrollController.hasClients) return;
-    final show = _scrollController.position.pixels <
-        _scrollController.position.maxScrollExtent - 140;
+
+    final show =
+        _scrollController.position.pixels <
+            _scrollController.position.maxScrollExtent - 140;
+
     if (show != _showScrollButton) {
       setState(() => _showScrollButton = show);
     }
+  }
+
+  void _onFaqSearchChanged() {
+    if (!mounted) return;
+
+    setState(() {
+      _faqSearchQuery = _faqSearchController.text.trim();
+    });
   }
 
   Future<void> _init() async {
@@ -157,9 +206,10 @@ class ChatPageState extends State<ChatPage> {
       if (fullName != null && fullName.trim().isNotEmpty) {
         userFirstName = fullName.trim().split(' ').first;
       } else {
-        userFirstName = prefs.getString('first_name') ??
-            prefs.getString('firstName') ??
-            'there';
+        userFirstName =
+            prefs.getString('first_name') ??
+                prefs.getString('firstName') ??
+                'there';
       }
 
       if (mounted) {
@@ -177,7 +227,109 @@ class ChatPageState extends State<ChatPage> {
     }
   }
 
-  // ── Sending ────────────────────────────────────────────────
+  // ───────────────────────────────────────────────────────────
+  // Current month label
+  // ───────────────────────────────────────────────────────────
+  String get _currentMonthLabel {
+    final now = DateTime.now();
+    return '${_kMonthNames[now.month - 1]} ${now.year}';
+  }
+
+  /// Turns "Generate a report." → "Generate a report for October 2026."
+  String _withCurrentMonth(String basePrompt) {
+    final trimmed = basePrompt.trimRight();
+    final body = trimmed.endsWith('.')
+        ? trimmed.substring(0, trimmed.length - 1)
+        : trimmed;
+    return '$body for $_currentMonthLabel.';
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // FAQ loading
+  // ───────────────────────────────────────────────────────────
+  Future<void> _loadFaqs() async {
+    if (_isLoadingFaqs) return;
+
+    if (mounted) {
+      setState(() {
+        _isLoadingFaqs = true;
+        _faqError = null;
+      });
+    }
+
+    try {
+      final faqs = await ChatbotService.getFaqs();
+
+      // debugPrint('Kejahub FAQs loaded: ${faqs.length}');
+
+      if (!mounted) return;
+
+      setState(() {
+        _faqs = faqs;
+        _isLoadingFaqs = false;
+        _faqError = faqs.isEmpty
+            ? 'The server returned no usable FAQs.'
+            : null;
+
+        // Clear the expanded item if it no longer exists.
+        if (_expandedFaqId != null &&
+            !faqs.any((faq) => faq.id == _expandedFaqId)) {
+          _expandedFaqId = null;
+        }
+      });
+    } catch (e, stackTrace) {
+      // debugPrint('Failed to load Kejahub FAQs: $e');
+      // debugPrintStack(stackTrace: stackTrace);
+
+      if (!mounted) return;
+
+      setState(() {
+        _isLoadingFaqs = false;
+        _faqError = e.toString().replaceFirst('Exception: ', '');
+      });
+    }
+  }
+
+  List<AssistantFaq> get _filteredFaqs {
+    final query = _faqSearchQuery.trim().toLowerCase();
+
+    if (query.isEmpty) {
+      return _faqs;
+    }
+
+    return _faqs.where((faq) {
+      final category = faq.category ?? '';
+
+      return faq.question.toLowerCase().contains(query) ||
+          faq.answer.toLowerCase().contains(query) ||
+          category.toLowerCase().contains(query);
+    }).toList();
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // Tab switching
+  // ───────────────────────────────────────────────────────────
+  void _selectChatTab() {
+    if (!_showFaqs) return;
+
+    FocusScope.of(context).unfocus();
+    setState(() => _showFaqs = false);
+  }
+
+  void _selectFaqTab() {
+    if (_showFaqs) return;
+
+    FocusScope.of(context).unfocus();
+    setState(() => _showFaqs = true);
+
+    if (_faqs.isEmpty && !_isLoadingFaqs) {
+      _loadFaqs();
+    }
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // Sending messages
+  // ───────────────────────────────────────────────────────────
   Future<void> _sendMessage() async {
     final text = _textController.text.trim();
 
@@ -188,11 +340,13 @@ class ChatPageState extends State<ChatPage> {
 
   Future<void> _sendPrompt(String text) async {
     final trimmed = text.trim();
+
     if (trimmed.isEmpty || _isTyping) return;
 
     FocusScope.of(context).unfocus();
 
     setState(() {
+      _showFaqs = false;
       _messages.add(ChatMessage(text: trimmed, isUser: true));
       _textController.clear();
       _hasText = false;
@@ -257,10 +411,15 @@ class ChatPageState extends State<ChatPage> {
     });
   }
 
+  // ───────────────────────────────────────────────────────────
+  // New chat
+  // ───────────────────────────────────────────────────────────
   void _newChat() {
-    if (_messages.isEmpty) return;
+    if (_messages.isEmpty && !_showFaqs) return;
 
-    showDialog(
+    if (_isTyping) return;
+
+    showDialog<void>(
       context: context,
       builder: (dialogContext) {
         return AlertDialog(
@@ -269,17 +428,11 @@ class ChatPageState extends State<ChatPage> {
           ),
           title: const Text(
             'Start a new chat?',
-            style: TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.w800,
-            ),
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
           ),
           content: Text(
             'Your current conversation will be cleared.',
-            style: TextStyle(
-              fontSize: 13,
-              color: Colors.grey.shade600,
-            ),
+            style: TextStyle(fontSize: 13, color: Colors.grey.shade600),
           ),
           actions: [
             TextButton(
@@ -297,11 +450,7 @@ class ChatPageState extends State<ChatPage> {
               ),
               onPressed: () {
                 Navigator.pop(dialogContext);
-
-                setState(() {
-                  _messages.clear();
-                  _isTyping = false;
-                });
+                _startNewChat();
               },
               child: const Text('New Chat'),
             ),
@@ -311,9 +460,35 @@ class ChatPageState extends State<ChatPage> {
     );
   }
 
-  // ── Build ──────────────────────────────────────────────────
+  Future<void> _startNewChat() async {
+    try {
+      await ChatbotService.startNewConversation();
+    } catch (_) {
+      // Clear the local chat even if resetting the conversation ID fails.
+    }
+
+    if (!mounted) return;
+
+    setState(() {
+      _messages.clear();
+      _isTyping = false;
+      _showFaqs = false;
+      _showScrollButton = false;
+    });
+
+    _textController.clear();
+    _hasText = false;
+
+    _scrollToBottom();
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // Build
+  // ───────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
+    final showScrollBtn = _showScrollButton && !_showFaqs;
+
     return Scaffold(
       backgroundColor: _kBg,
       appBar: _buildAppBar(),
@@ -324,7 +499,9 @@ class ChatPageState extends State<ChatPage> {
               child: Stack(
                 children: [
                   Positioned.fill(
-                    child: _messages.isEmpty
+                    child: _showFaqs
+                        ? _buildFaqView()
+                        : _messages.isEmpty
                         ? _buildWelcomeView()
                         : _buildConversation(),
                   ),
@@ -332,19 +509,17 @@ class ChatPageState extends State<ChatPage> {
                     right: 16,
                     bottom: 16,
                     child: AnimatedSlide(
-                      offset: _showScrollButton
+                      offset: showScrollBtn
                           ? Offset.zero
                           : const Offset(0, 0.5),
                       duration: const Duration(milliseconds: 220),
                       curve: Curves.easeOut,
                       child: AnimatedOpacity(
-                        opacity: _showScrollButton ? 1 : 0,
+                        opacity: showScrollBtn ? 1 : 0,
                         duration: const Duration(milliseconds: 200),
                         child: IgnorePointer(
-                          ignoring: !_showScrollButton,
-                          child: _ScrollToBottomButton(
-                            onTap: _scrollToBottom,
-                          ),
+                          ignoring: !showScrollBtn,
+                          child: _ScrollToBottomButton(onTap: _scrollToBottom),
                         ),
                       ),
                     ),
@@ -352,14 +527,16 @@ class ChatPageState extends State<ChatPage> {
                 ],
               ),
             ),
-            _buildComposer(),
+            if (!_showFaqs) _buildComposer(),
           ],
         ),
       ),
     );
   }
 
-  // ── App bar ────────────────────────────────────────────────
+  // ───────────────────────────────────────────────────────────
+  // App bar (with side-by-side Chat / FAQ tabs)
+  // ───────────────────────────────────────────────────────────
   PreferredSizeWidget _buildAppBar() {
     return AppBar(
       elevation: 0,
@@ -369,16 +546,10 @@ class ChatPageState extends State<ChatPage> {
       foregroundColor: Colors.black87,
       titleSpacing: 16,
       toolbarHeight: 66,
-      shape: const Border(
-        bottom: BorderSide(color: _kBorder),
-      ),
+      shape: const Border(bottom: BorderSide(color: _kBorder)),
       title: Row(
         children: [
-          const _PulsingLogo(
-            size: 40,
-            borderRadius: 13,
-            iconSize: 20,
-          ),
+          const _PulsingLogo(size: 40, borderRadius: 13, iconSize: 20),
           const SizedBox(width: 11),
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -398,7 +569,7 @@ class ChatPageState extends State<ChatPage> {
                   const _LiveDot(size: 6.5),
                   const SizedBox(width: 6),
                   Text(
-                    'Property Manager',
+                    _showFaqs ? 'Help Centre' : 'Property Manager',
                     style: TextStyle(
                       fontSize: 9.5,
                       color: Colors.grey.shade500,
@@ -414,17 +585,552 @@ class ChatPageState extends State<ChatPage> {
         IconButton(
           tooltip: 'New chat',
           onPressed: _newChat,
-          icon: const Icon(
-            Icons.add_comment_outlined,
-            size: 21,
-          ),
+          icon: const Icon(Icons.add_comment_outlined, size: 21),
         ),
         const SizedBox(width: 8),
       ],
+      bottom: PreferredSize(
+        preferredSize: const Size.fromHeight(50),
+        child: Container(
+          color: Colors.white,
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+          child: _buildTabSwitcher(),
+        ),
+      ),
     );
   }
 
-  // ── Welcome ────────────────────────────────────────────────
+  Widget _buildTabSwitcher() {
+    return Container(
+      height: 40,
+      decoration: BoxDecoration(
+        color: _kTabTrack,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: _buildTabItem(
+              label: 'Chat',
+              icon: Icons.chat_bubble_outline_rounded,
+              selected: !_showFaqs,
+              onTap: _selectChatTab,
+            ),
+          ),
+          Expanded(
+            child: _buildTabItem(
+              label: 'FAQ',
+              icon: Icons.quiz_outlined,
+              selected: _showFaqs,
+              onTap: _selectFaqTab,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTabItem({
+    required String label,
+    required IconData icon,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: AnimatedContainer(
+        height: 40,
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+        margin: const EdgeInsets.all(4),
+        decoration: BoxDecoration(
+          // Selected tab: solid blue background.
+          // Unselected tab: transparent.
+          color: selected ? _kPrimary : Colors.transparent,
+          borderRadius: BorderRadius.circular(9),
+          boxShadow: selected
+              ? [
+            BoxShadow(
+              color: _kPrimary.withValues(alpha: 0.30),
+              blurRadius: 10,
+              offset: const Offset(0, 3),
+            ),
+          ]
+              : null,
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              icon,
+              size: 16,
+              color: selected ? Colors.white : _kMuted,
+            ),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: selected ? FontWeight.w700 : FontWeight.w600,
+                color: selected ? Colors.white : _kMuted,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // FAQ view
+  // ───────────────────────────────────────────────────────────
+  Widget _buildFaqView() {
+    final filteredFaqs = _filteredFaqs;
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final horizontalPadding = constraints.maxWidth > 900 ? 70.0 : 16.0;
+
+        return SingleChildScrollView(
+          padding: EdgeInsets.fromLTRB(
+            horizontalPadding,
+            24,
+            horizontalPadding,
+            28,
+          ),
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 850),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Container(
+                        width: 46,
+                        height: 46,
+                        decoration: BoxDecoration(
+                          gradient: const LinearGradient(
+                            colors: [_kPrimary, _kSecondary],
+                          ),
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        child: const Icon(
+                          Icons.help_outline_rounded,
+                          color: Colors.white,
+                          size: 24,
+                        ),
+                      ),
+                      const SizedBox(width: 13),
+                      const Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Frequently asked questions',
+                              style: TextStyle(
+                                color: _kInk,
+                                fontSize: 18,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                            SizedBox(height: 5),
+                            Text(
+                              'Find answers about managing your properties.',
+                              style: TextStyle(color: _kMuted, fontSize: 11),
+                            ),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Refresh FAQs',
+                        onPressed: _isLoadingFaqs ? null : _loadFaqs,
+                        icon: const Icon(Icons.refresh_rounded),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 22),
+
+                  // FAQ search
+                  TextField(
+                    controller: _faqSearchController,
+                    textInputAction: TextInputAction.search,
+                    decoration: InputDecoration(
+                      hintText: 'Search questions or topics...',
+                      hintStyle: const TextStyle(fontSize: 12, color: _kMuted),
+                      prefixIcon: const Icon(
+                        Icons.search_rounded,
+                        size: 20,
+                        color: _kMuted,
+                      ),
+                      suffixIcon: _faqSearchQuery.isNotEmpty
+                          ? IconButton(
+                        tooltip: 'Clear search',
+                        onPressed: _faqSearchController.clear,
+                        icon: const Icon(Icons.close_rounded, size: 18),
+                      )
+                          : null,
+                      filled: true,
+                      fillColor: Colors.white,
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 14,
+                      ),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(15),
+                        borderSide: const BorderSide(color: _kBorder),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(15),
+                        borderSide: const BorderSide(color: _kBorder),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(15),
+                        borderSide: const BorderSide(
+                          color: _kPrimary,
+                          width: 1.3,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+
+                  if (_isLoadingFaqs && _faqs.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 70),
+                      child: Center(
+                        child: Column(
+                          children: [
+                            CircularProgressIndicator(
+                              color: _kPrimary,
+                              strokeWidth: 2.5,
+                            ),
+                            SizedBox(height: 14),
+                            Text(
+                              'Loading frequently asked questions...',
+                              style: TextStyle(color: _kMuted, fontSize: 12),
+                            ),
+                          ],
+                        ),
+                      ),
+                    )
+                  else if (_faqError != null && _faqs.isEmpty)
+                    _buildFaqMessage(
+                      icon: Icons.cloud_off_outlined,
+                      message: _faqError!,
+                      actionLabel: 'Try again',
+                      onAction: _loadFaqs,
+                    )
+                  else if (filteredFaqs.isEmpty)
+                      _buildFaqMessage(
+                        icon: Icons.search_off_rounded,
+                        message: _faqs.isEmpty
+                            ? 'No FAQs have been configured yet.'
+                            : 'No questions match your search.',
+                        actionLabel: _faqs.isEmpty ? 'Refresh' : 'Clear search',
+                        onAction: _faqs.isEmpty
+                            ? _loadFaqs
+                            : _faqSearchController.clear,
+                      )
+                    else ...[
+                        Row(
+                          children: [
+                            const Text(
+                              'Browse answers',
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w800,
+                                color: _kInk,
+                              ),
+                            ),
+                            const Spacer(),
+                            Text(
+                              '${filteredFaqs.length} '
+                                  '${filteredFaqs.length == 1 ? 'question' : 'questions'}',
+                              style: const TextStyle(fontSize: 10, color: _kMuted),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+                        ...filteredFaqs.map(_buildFaqCard),
+                      ],
+
+                  const SizedBox(height: 14),
+                  _buildAskAiCard(),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildFaqCard(AssistantFaq faq) {
+    final expanded = _expandedFaqId == faq.id;
+    final category = faq.category?.trim() ?? '';
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Container(
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: expanded
+                ? _kPrimary.withValues(alpha: 0.35)
+                : _kBorder,
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: _kInk.withValues(alpha: 0.025),
+              blurRadius: 12,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: Column(
+          children: [
+            InkWell(
+              borderRadius: BorderRadius.circular(16),
+              onTap: () {
+                setState(() {
+                  if (expanded) {
+                    _expandedFaqId = null;
+                  } else {
+                    _expandedFaqId = faq.id;
+                  }
+                });
+              },
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      width: 32,
+                      height: 32,
+                      decoration: BoxDecoration(
+                        color: const Color(0xffEFF6FF),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: const Icon(
+                        Icons.question_mark_rounded,
+                        color: _kPrimary,
+                        size: 18,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (category.isNotEmpty) ...[
+                            Text(
+                              category.toUpperCase(),
+                              style: const TextStyle(
+                                color: _kPrimary,
+                                fontSize: 9,
+                                letterSpacing: 0.7,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                            const SizedBox(height: 5),
+                          ],
+                          Text(
+                            faq.question,
+                            style: const TextStyle(
+                              color: _kInk,
+                              fontSize: 12.5,
+                              height: 1.45,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    AnimatedRotation(
+                      turns: expanded ? 0.5 : 0,
+                      duration: const Duration(milliseconds: 180),
+                      child: const Icon(
+                        Icons.keyboard_arrow_down_rounded,
+                        color: _kMuted,
+                        size: 22,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            AnimatedCrossFade(
+              firstChild: const SizedBox(
+                width: double.infinity,
+              ),
+              secondChild: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Divider(
+                      height: 1,
+                      color: _kBorder,
+                    ),
+                    const SizedBox(height: 13),
+                    SizedBox(
+                      width: double.infinity,
+                      child: Text(
+                        faq.answer,
+                        style: const TextStyle(
+                          color: Color(0xff475569),
+                          fontSize: 12,
+                          height: 1.7,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: OutlinedButton.icon(
+                        onPressed: _isTyping
+                            ? null
+                            : () => _sendPrompt(faq.question),
+                        icon: const Icon(
+                          Icons.auto_awesome_rounded,
+                          size: 16,
+                        ),
+                        label: const Text('Ask Kejahub AI'),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: _kPrimary,
+                          side: const BorderSide(
+                            color: Color(0xffBFDBFE),
+                          ),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(11),
+                          ),
+                          textStyle: const TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              crossFadeState: expanded
+                  ? CrossFadeState.showSecond
+                  : CrossFadeState.showFirst,
+              duration: const Duration(milliseconds: 220),
+              sizeCurve: Curves.easeInOut,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFaqMessage({
+    required IconData icon,
+    required String message,
+    required String actionLabel,
+    required VoidCallback onAction,
+  }) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 30),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: _kBorder),
+      ),
+      child: Column(
+        children: [
+          Icon(icon, color: _kMuted, size: 35),
+          const SizedBox(height: 12),
+          Text(
+            message,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              color: Color(0xff64748B),
+              fontSize: 12,
+              height: 1.5,
+            ),
+          ),
+          const SizedBox(height: 14),
+          TextButton.icon(
+            onPressed: onAction,
+            icon: const Icon(Icons.refresh_rounded, size: 16),
+            label: Text(actionLabel),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAskAiCard() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xffEFF6FF), Color(0xffF5F3FF)],
+        ),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xffDBEAFE)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.auto_awesome_rounded, color: _kPrimary, size: 23),
+          const SizedBox(width: 12),
+          const Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Need more help?',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                    color: _kInk,
+                  ),
+                ),
+                SizedBox(height: 5),
+                Text(
+                  'Ask Kejahub AI about your own properties, '
+                      'tenants, rent collections or maintenance.',
+                  style: TextStyle(
+                    fontSize: 11,
+                    height: 1.5,
+                    color: Color(0xff475569),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          IconButton(
+            tooltip: 'Ask Kejahub AI',
+            onPressed: () {
+              setState(() {
+                _showFaqs = false;
+              });
+
+              FocusScope.of(context).requestFocus(_focusNode);
+            },
+            icon: const Icon(Icons.chat_rounded, color: _kPrimary),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ───────────────────────────────────────────────────────────
+  // Welcome
+  // ───────────────────────────────────────────────────────────
   Widget _buildWelcomeView() {
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -594,7 +1300,8 @@ class ChatPageState extends State<ChatPage> {
       color: Colors.white,
       borderRadius: BorderRadius.circular(16),
       child: InkWell(
-        onTap: () => _sendPrompt(prompt.prompt),
+        // Tapping a suggestion now appends the current month.
+        onTap: () => _sendPrompt(_withCurrentMonth(prompt.prompt)),
         borderRadius: BorderRadius.circular(16),
         splashColor: prompt.color.withValues(alpha: 0.10),
         highlightColor: prompt.color.withValues(alpha: 0.05),
@@ -627,11 +1334,7 @@ class ChatPageState extends State<ChatPage> {
                   ),
                   borderRadius: BorderRadius.circular(11),
                 ),
-                child: Icon(
-                  prompt.icon,
-                  color: prompt.color,
-                  size: 18,
-                ),
+                child: Icon(prompt.icon, color: prompt.color, size: 18),
               ),
               const SizedBox(width: 10),
               Expanded(
@@ -672,7 +1375,9 @@ class ChatPageState extends State<ChatPage> {
     );
   }
 
-  // ── Conversation ───────────────────────────────────────────
+  // ───────────────────────────────────────────────────────────
+  // Conversation
+  // ───────────────────────────────────────────────────────────
   Widget _buildConversation() {
     final itemCount = _messages.length + (_isTyping ? 1 : 0);
 
@@ -696,7 +1401,9 @@ class ChatPageState extends State<ChatPage> {
     );
   }
 
-  // ── Composer ───────────────────────────────────────────────
+  // ───────────────────────────────────────────────────────────
+  // Composer
+  // ───────────────────────────────────────────────────────────
   Widget _buildComposer() {
     final canSend = _hasText && !_isTyping;
     final focused = _focusNode.hasFocus;
@@ -744,25 +1451,38 @@ class ChatPageState extends State<ChatPage> {
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
                 Expanded(
-                  child: TextField(
-                    controller: _textController,
-                    focusNode: _focusNode,
-                    enabled: !_isTyping,
-                    minLines: 1,
-                    maxLines: 4,
-                    textCapitalization: TextCapitalization.sentences,
-                    style: const TextStyle(fontSize: 13, color: _kInk),
-                    decoration: InputDecoration(
-                      hintText: _isTyping
-                          ? 'Kejahub AI is responding…'
-                          : 'Ask about your properties...',
-                      hintStyle: const TextStyle(
-                        fontSize: 12,
-                        color: _kMuted,
+                  child: CallbackShortcuts(
+                    bindings: {
+                      const SingleActivator(
+                        LogicalKeyboardKey.enter,
+                        includeRepeats: false,
+                      ): _sendMessage,
+                      const SingleActivator(
+                        LogicalKeyboardKey.numpadEnter,
+                        includeRepeats: false,
+                      ): _sendMessage,
+                    },
+                    child: TextField(
+                      controller: _textController,
+                      focusNode: _focusNode,
+                      enabled: !_isTyping,
+                      minLines: 1,
+                      maxLines: 4,
+                      textInputAction: TextInputAction.send,
+                      textCapitalization: TextCapitalization.sentences,
+                      style: const TextStyle(fontSize: 13, color: _kInk),
+                      decoration: InputDecoration(
+                        hintText: _isTyping
+                            ? 'Kejahub AI is responding…'
+                            : 'Ask about your properties...',
+                        hintStyle: const TextStyle(
+                          fontSize: 12,
+                          color: _kMuted,
+                        ),
+                        border: InputBorder.none,
                       ),
-                      border: InputBorder.none,
+                      onSubmitted: (_) => _sendMessage(),
                     ),
-                    onSubmitted: (_) => _sendMessage(),
                   ),
                 ),
                 const SizedBox(width: 5),
@@ -800,9 +1520,7 @@ class ChatPageState extends State<ChatPage> {
                         duration: const Duration(milliseconds: 200),
                         child: Icon(
                           Icons.arrow_upward_rounded,
-                          color: canSend
-                              ? Colors.white
-                              : Colors.grey.shade400,
+                          color: canSend ? Colors.white : Colors.grey.shade400,
                           size: 19,
                         ),
                       ),
@@ -815,10 +1533,7 @@ class ChatPageState extends State<ChatPage> {
           const SizedBox(height: 6),
           const Text(
             'AI can make mistakes. Verify important information.',
-            style: TextStyle(
-              fontSize: 9,
-              color: Color(0xffA1A9B5),
-            ),
+            style: TextStyle(fontSize: 9, color: Color(0xffA1A9B5)),
           ),
         ],
       ),
@@ -827,7 +1542,7 @@ class ChatPageState extends State<ChatPage> {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  Scroll-to-bottom pill
+// Scroll-to-bottom pill
 // ─────────────────────────────────────────────────────────────
 class _ScrollToBottomButton extends StatelessWidget {
   const _ScrollToBottomButton({required this.onTap});
@@ -868,7 +1583,7 @@ class _ScrollToBottomButton extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  "AI is thinking" bubble
+// AI thinking bubble
 // ─────────────────────────────────────────────────────────────
 class _ThinkingBubble extends StatefulWidget {
   const _ThinkingBubble();
@@ -891,9 +1606,13 @@ class _ThinkingBubbleState extends State<_ThinkingBubble> {
   @override
   void initState() {
     super.initState();
+
     _timer = Timer.periodic(const Duration(milliseconds: 2400), (_) {
       if (!mounted) return;
-      setState(() => _index = (_index + 1) % _statuses.length);
+
+      setState(() {
+        _index = (_index + 1) % _statuses.length;
+      });
     });
   }
 
@@ -914,10 +1633,7 @@ class _ThinkingBubbleState extends State<_ThinkingBubble> {
           const SizedBox(width: 10),
           Flexible(
             child: Container(
-              padding: const EdgeInsets.symmetric(
-                horizontal: 14,
-                vertical: 12,
-              ),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
               decoration: BoxDecoration(
                 color: Colors.white,
                 borderRadius: const BorderRadius.only(
@@ -981,7 +1697,7 @@ class _ThinkingBubbleState extends State<_ThinkingBubble> {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  Rotating gradient orb (AI avatar while thinking)
+// Rotating gradient orb
 // ─────────────────────────────────────────────────────────────
 class _RotatingOrb extends StatefulWidget {
   const _RotatingOrb({this.size = 32});
@@ -1015,7 +1731,6 @@ class _RotatingOrbState extends State<_RotatingOrb>
       child: Stack(
         alignment: Alignment.center,
         children: [
-          // soft glow
           Container(
             width: size,
             height: size,
@@ -1030,7 +1745,6 @@ class _RotatingOrbState extends State<_RotatingOrb>
               ],
             ),
           ),
-          // spinning sweep gradient ring
           RotationTransition(
             turns: _controller,
             child: Container(
@@ -1039,17 +1753,11 @@ class _RotatingOrbState extends State<_RotatingOrb>
               decoration: const BoxDecoration(
                 shape: BoxShape.circle,
                 gradient: SweepGradient(
-                  colors: [
-                    _kPrimary,
-                    _kSecondary,
-                    _kAccent,
-                    _kPrimary,
-                  ],
+                  colors: [_kPrimary, _kSecondary, _kAccent, _kPrimary],
                 ),
               ),
             ),
           ),
-          // inner disc
           Container(
             width: size - 5,
             height: size - 5,
@@ -1058,11 +1766,7 @@ class _RotatingOrbState extends State<_RotatingOrb>
               shape: BoxShape.circle,
             ),
           ),
-          Icon(
-            Icons.auto_awesome,
-            size: size * 0.42,
-            color: _kSecondary,
-          ),
+          Icon(Icons.auto_awesome, size: size * 0.42, color: _kSecondary),
         ],
       ),
     );
@@ -1070,7 +1774,7 @@ class _RotatingOrbState extends State<_RotatingOrb>
 }
 
 // ─────────────────────────────────────────────────────────────
-//  Bouncing typing dots
+// Bouncing typing dots
 // ─────────────────────────────────────────────────────────────
 class _TypingDots extends StatefulWidget {
   const _TypingDots();
@@ -1132,14 +1836,10 @@ class _TypingDotsState extends State<_TypingDots>
 }
 
 // ─────────────────────────────────────────────────────────────
-//  Pulsing gradient logo
+// Pulsing gradient logo
 // ─────────────────────────────────────────────────────────────
 class _PulsingLogo extends StatefulWidget {
-  const _PulsingLogo({
-    required this.size,
-    this.borderRadius,
-    this.iconSize,
-  });
+  const _PulsingLogo({required this.size, this.borderRadius, this.iconSize});
 
   final double size;
   final double? borderRadius;
@@ -1208,13 +1908,10 @@ class _PulsingLogoState extends State<_PulsingLogo>
 }
 
 // ─────────────────────────────────────────────────────────────
-//  Live "online" pulsing dot
+// Live online pulsing dot
 // ─────────────────────────────────────────────────────────────
 class _LiveDot extends StatefulWidget {
-  const _LiveDot({
-    this.size = 7,
-    this.color = const Color(0xff22C55E),
-  });
+  const _LiveDot({this.size = 7, this.color = const Color(0xff22C55E)});
 
   final double size;
   final Color color;
@@ -1277,7 +1974,7 @@ class _LiveDotState extends State<_LiveDot>
 }
 
 // ─────────────────────────────────────────────────────────────
-//  Entrance animation helper
+// Entrance animation helper
 // ─────────────────────────────────────────────────────────────
 class _FadeSlideIn extends StatefulWidget {
   const _FadeSlideIn({
@@ -1317,6 +2014,7 @@ class _FadeSlideInState extends State<_FadeSlideIn>
     );
 
     _fade = curved;
+
     _slide = Tween<Offset>(
       begin: widget.offset,
       end: Offset.zero,
@@ -1342,16 +2040,13 @@ class _FadeSlideInState extends State<_FadeSlideIn>
   Widget build(BuildContext context) {
     return FadeTransition(
       opacity: _fade,
-      child: SlideTransition(
-        position: _slide,
-        child: widget.child,
-      ),
+      child: SlideTransition(position: _slide, child: widget.child),
     );
   }
 }
 
 // ─────────────────────────────────────────────────────────────
-//  Prompt model
+// Prompt model
 // ─────────────────────────────────────────────────────────────
 class _ChatPrompt {
   final String title;

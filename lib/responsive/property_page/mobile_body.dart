@@ -2849,16 +2849,16 @@ class _PropertyDetailsMobilePageState extends State<PropertyDetailsMobilePage>
       runSpacing: 8,
       children: [
         _buildQuickAction(
-          label: 'Add Tenant',
-          icon: Icons.person_add_alt_1_rounded,
-          color: const Color(0xFF4F46E5),
-          onTap: _showAddTenantDialog,
-        ),
-        _buildQuickAction(
           label: 'Add Unit',
           icon: Icons.add_home_work_outlined,
           color: const Color(0xFF2563EB),
           onTap: _showAddUnitDialog,
+        ),
+        _buildQuickAction(
+          label: 'Add Tenant',
+          icon: Icons.person_add_alt_1_rounded,
+          color: const Color(0xFF4F46E5),
+          onTap: _showAddTenantDialog,
         ),
         _buildQuickAction(
           label: 'View Units',
